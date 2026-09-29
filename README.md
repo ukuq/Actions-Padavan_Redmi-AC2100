@@ -5,8 +5,15 @@
 - 编译目标为Redmi-AC2100
 - 默认登陆地址[192.168.5.1](http://192.168.5.1),登录名admin/admin
 
-### Actions secrets配置
-- 有关`secrets.ACTIONS_REPO_PAT`请参阅[源码更新自动编译内容](https://p3terx.com/archives/build-openwrt-with-github-actions.html#toc_13)
+### WPA3-Personal（5 GHz）
+
+构建时会自动应用 [本地补丁](patches/wpa3-personal-5g.patch)，在 5 GHz 无线设置中加入 WPA3-Personal。该模式使用 MT7615 驱动的 SAE、AES 和强制 PMF；2.4 GHz MT7603 的当前驱动配置未启用 WPA3，因此该频段仍只显示原有选项。
+
+补丁依据上游 `MeIsReallyBa/padavan-4.4` 的 `10893720a7a620869c920a8c6bde41eb28df573b` 版本制作。若上游修改了相关文件，构建会在应用补丁时失败，需要先更新补丁。实际无线连接仍需在 RM2100 硬件上验证。
+
+### 自动构建
+
+每周的 Update Checker 检查上游 `main` 分支；发现新提交时，使用仓库自带的 `GITHUB_TOKEN` 触发 Build Padavan，无需额外配置 PAT。也可以从 Actions 页面手动启动构建。
 
 ### 防火墙ipv6配置参考
 - 关闭ipv6防火墙

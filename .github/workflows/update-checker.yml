@@ -1,57 +1,59 @@
-#
-# Copyright (c) 2019-2021 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-# https://github.com/P3TERX/Actions-OpenWrt
-# File: .github/workflows/update-checker.yml
-# Description: Source code update checker
-#
-
 name: Update Checker
-
-env:
-  REPO_URL: https://github.com/MeIsReallyBa/padavan-4.4
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: 0 23 * * 6
+    - cron: '0 23 * * 6'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: padavan-update-checker
+  cancel-in-progress: false
+
+env:
+  REPO_URL: https://github.com/MeIsReallyBa/padavan-4.4
+  REPO_BRANCH: main
 
 jobs:
   check:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
 
     steps:
+      - name: Get upstream commit
+        id: upstream
+        run: |
+          commit=$(git ls-remote "$REPO_URL" "refs/heads/$REPO_BRANCH" | cut -f 1)
+          test -n "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
-    - name: Get Commit Hash
-      id: getHash
-      run: |
-        git clone --depth 1 $REPO_URL .
-        echo "::set-output name=commitHash::$(git rev-parse HEAD)"
+      - name: Check for an existing build trigger
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/padavan-source-hash
+          key: padavan-${{ steps.upstream.outputs.commit }}
 
-    - name: Compare Commit Hash
-      id: cacheHash
-      uses: actions/cache@v2
-      with:
-        path: .commitHash
-        key: HEAD-${{ steps.getHash.outputs.commitHash }}
+      - name: Trigger build for new source
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ steps.upstream.outputs.commit }}
+        run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/dispatches" \
+            -f event_type='Source Code Update' \
+            -f "client_payload[commit]=$SOURCE_COMMIT"
 
-    - name: Save New Commit Hash
-      if: steps.cacheHash.outputs.cache-hit != 'true'
-      run: |
-        echo ${{ steps.getHash.outputs.commitHash }} | tee .commitHash
+      - name: Save triggered commit
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          SOURCE_COMMIT: ${{ steps.upstream.outputs.commit }}
+        run: printf '%s\n' "$SOURCE_COMMIT" > "$RUNNER_TEMP/padavan-source-hash"
 
-    - name: Trigger build
-      if: steps.cacheHash.outputs.cache-hit != 'true'
-      uses: peter-evans/repository-dispatch@v1
-      with:
-        token: ${{ secrets.ACTIONS_REPO_PAT }}
-        event-type: Source Code Update
-
-    - name: Delete workflow runs
-      uses: GitRML/delete-workflow-runs@main
-      with:
-        retain_days: 1
-        keep_minimum_runs: 1
+      - name: Cache triggered commit
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/padavan-source-hash
+          key: padavan-${{ steps.upstream.outputs.commit }}

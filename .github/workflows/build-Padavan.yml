@@ -4,106 +4,117 @@ on:
   repository_dispatch:
   workflow_dispatch:
 
+permissions:
+  contents: write
+  actions: write
+
 env:
   REPO_URL: https://github.com/MeIsReallyBa/padavan-4.4
   REPO_BRANCH: main
-  UPLOAD_RELEASE: true
+  UPLOAD_RELEASE: 'true'
   TNAME: RM2100
   CONFIG_FILE: RM2100.config
   DIY_SH: diy.sh
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    env:
+      SOURCE_DIR: ${{ github.workspace }}/rt-n56u
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Prepare environment
-      run: |
-       sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
-       sudo -E apt-get -qq update
-       sudo -E apt-get -qq install libtool-bin gperf python3-docutils autopoint gettext zip
-       sudo -E apt-get -qq autoremove --purge
-       sudo -E apt-get -qq clean
-       sudo timedatectl set-timezone "Asia/Shanghai"
+      - name: Prepare environment
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y --no-install-recommends libtool-bin gperf python3-docutils autopoint gettext zip
 
-    - name: Clone source
-      if: (!cancelled())
-      run: |
-       df -hT $PWD
-       git clone --depth=1 $REPO_URL -b $REPO_BRANCH /opt/rt-n56u
+      - name: Clone source
+        env:
+          SOURCE_COMMIT: ${{ github.event.client_payload.commit }}
+        run: |
+          git clone --depth=1 --branch "$REPO_BRANCH" "$REPO_URL" "$SOURCE_DIR"
+          if [ -n "$SOURCE_COMMIT" ] && [ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" != "$SOURCE_COMMIT" ]; then
+            git -C "$SOURCE_DIR" fetch --depth=1 origin "$SOURCE_COMMIT"
+            git -C "$SOURCE_DIR" checkout --detach "$SOURCE_COMMIT"
+          fi
+          git -C "$SOURCE_DIR" rev-parse HEAD
 
-    - name: Load custom configuration
-      run: |
-        mv -f $CONFIG_FILE /opt/rt-n56u/trunk/configs/templates/$TNAME.config
-        chmod +x $DIY_SH
-        cd /opt/rt-n56u
-        $GITHUB_WORKSPACE/$DIY_SH
+      - name: Load custom configuration
+        run: |
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" "$SOURCE_DIR/trunk/configs/templates/$TNAME.config"
+          sh "$GITHUB_WORKSPACE/$DIY_SH"
+        working-directory: ${{ env.SOURCE_DIR }}
 
-    - name: Download toolchain
-      if: (!cancelled())
-      run: |
-       cd /opt/rt-n56u/toolchain-mipsel
-       sh dl_toolchain.sh
+      - name: Download toolchain
+        run: sh dl_toolchain.sh
+        working-directory: ${{ env.SOURCE_DIR }}/toolchain-mipsel
 
-    - name: Compile the firmware
-      if: (!cancelled())
-      id: compile
-      run: |
-        cd /opt/rt-n56u/trunk
-        cp -f configs/templates/$TNAME.config .config
-        sudo ./build_firmware_modify $TNAME 0 
-        echo "status=success" >> $GITHUB_OUTPUT
-        echo "FILE_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+      - name: Compile the firmware
+        id: compile
+        run: |
+          cp "configs/templates/$TNAME.config" .config
+          sudo ./build_firmware_modify "$TNAME" 0
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "FILE_DATE=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_ENV"
+        working-directory: ${{ env.SOURCE_DIR }}/trunk
 
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@v3
-      if: steps.compile.outputs.status == 'success' && !cancelled()
-      with:
-        name: Padavan_firmware_${{ env.TNAME }}_${{ env.FILE_DATE }}
-        path: /opt/rt-n56u/trunk/images
+      - name: Upload firmware directory
+        if: steps.compile.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Padavan_firmware_${{ env.TNAME }}_${{ env.FILE_DATE }}
+          path: ${{ env.SOURCE_DIR }}/trunk/images
+          if-no-files-found: error
 
-    - name: Generate release tag
-      id: tag
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-       echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-       touch release.txt
-       echo "## MeIsReallyBa Padavan-4.4 Release $(date +"%Y.%m.%d-%H:%M")" >> release.txt
-       echo "- Source code:" >> release.txt
-       echo "  ${{ env.REPO_URL }}/tree/${{ env.REPO_BRANCH }}" >> release.txt
-       echo "- ${{ env.TNAME }}.trx" >> release.txt
-       echo "  md5sum: $(md5sum /opt/rt-n56u/trunk/images/*.trx | cut -d" " -f1)" >> release.txt
-       echo "  sha256: $(sha256sum /opt/rt-n56u/trunk/images/*.trx | cut -d" " -f1)" >> release.txt
-       echo "status=success" >> $GITHUB_OUTPUT
+      - name: Generate release notes
+        id: tag
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
+        run: |
+          echo "release_tag=$(date -u +%Y.%m.%d-%H%M)-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          source_commit=$(git -C "$SOURCE_DIR" rev-parse HEAD)
+          {
+            echo "## Padavan RM2100 $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "Source: $REPO_URL/tree/$source_commit"
+            echo "Build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            for firmware in "$SOURCE_DIR"/trunk/images/*.trx; do
+              test -f "$firmware" || exit 1
+              echo "### $(basename "$firmware")"
+              echo "MD5: $(md5sum "$firmware" | cut -d ' ' -f 1)"
+              echo "SHA256: $(sha256sum "$firmware" | cut -d ' ' -f 1)"
+            done
+          } > release.txt
 
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-       GITHUB_TOKEN: ${{ github.token }}
-      with:
-       tag_name: ${{ steps.tag.outputs.release_tag }}
-       body_path: release.txt
-       files: |
-        /opt/rt-n56u/trunk/images/*.trx
-        /opt/rt-n56u/trunk/configs/templates/${{ env.TNAME }}.config
+      - name: Upload firmware to release
+        if: steps.tag.outcome == 'success' && env.UPLOAD_RELEASE == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          body_path: release.txt
+          files: |
+            ${{ env.SOURCE_DIR }}/trunk/images/*.trx
+            ${{ env.SOURCE_DIR }}/trunk/configs/templates/${{ env.TNAME }}.config
+          fail_on_unmatched_files: true
 
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-       token: ${{ github.token }}
-       repository: ${{ github.repository }}
-       retain_days: 1
-       keep_minimum_runs: 3
+      - name: Delete old workflow runs
+        if: always()
+        continue-on-error: true
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 1
+          keep_minimum_runs: 3
 
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@v0.2.1
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-       keep_latest: 3
-       delete_tags: true
-      env:
-       GITHUB_TOKEN: ${{ github.token }}
+      - name: Remove old releases
+        if: steps.tag.outcome == 'success' && env.UPLOAD_RELEASE == 'true'
+        continue-on-error: true
+        uses: dev-drprasad/delete-older-releases@v0.2.1
+        with:
+          keep_latest: 3
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
